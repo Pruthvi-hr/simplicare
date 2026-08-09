@@ -1,107 +1,97 @@
-import { analyzeMedicalBillFromImageUrl } from "@/lib/ai";
-import { buildSpeechScript } from "@/lib/bill-presentation";
-import { textToSpeechAndUpload } from "@/lib/tts";
-import { createClient } from "@supabase/supabase-js";
-import { randomUUID } from "crypto";
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
+import { GoogleGenAI } from '@google/genai';
+import axios from 'axios';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = "nodejs";
-
-const BILL_UPLOAD_BUCKET = "bill_uploads";
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const key = serviceKey ?? anonKey;
-
-  if (!url || !key) {
-    throw new Error("Supabase is not configured.");
-  }
-
-  return createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
-
-function extensionForFile(file: File): string {
-  const fromName = file.name.split(".").pop()?.toLowerCase();
-  if (fromName && /^[a-z0-9]+$/.test(fromName)) {
-    return fromName === "jpeg" ? "jpg" : fromName;
-  }
-
-  const mime = file.type.toLowerCase();
-  if (mime.includes("png")) return "png";
-  if (mime.includes("webp")) return "webp";
-  if (mime.includes("gif")) return "gif";
-  return "jpg";
-}
-
-async function uploadBillImage(file: File): Promise<string> {
-  const buffer = Buffer.from(await file.arrayBuffer());
-  if (buffer.byteLength === 0) {
-    throw new Error("Uploaded file is empty.");
-  }
-  if (buffer.byteLength > MAX_IMAGE_BYTES) {
-    throw new Error("Image must be 10 MB or smaller.");
-  }
-
-  const supabase = getSupabaseAdmin();
-  const objectPath = `${randomUUID()}.${extensionForFile(file)}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from(BILL_UPLOAD_BUCKET)
-    .upload(objectPath, buffer, {
-      contentType: file.type || "image/jpeg",
-      upsert: false,
-    });
-
-  if (uploadError) {
-    throw new Error(`Failed to store bill image: ${uploadError.message}`);
-  }
-
-  const { data: signed, error: signError } = await supabase.storage
-    .from(BILL_UPLOAD_BUCKET)
-    .createSignedUrl(objectPath, 60 * 15);
-
-  if (signError || !signed?.signedUrl) {
-    throw new Error("Could not create a secure link for bill analysis.");
-  }
-
-  return signed.signedUrl;
-}
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+);
 
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
-    const image = formData.get("image");
+    const file = formData.get('file') as File;
 
-    if (!(image instanceof File)) {
-      return NextResponse.json(
-        { error: "Please choose a bill image to upload." },
-        { status: 400 },
-      );
+    if (!file) {
+      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
     }
 
-    if (!image.type.startsWith("image/")) {
-      return NextResponse.json(
-        { error: "Only image files are supported." },
-        { status: 400 },
-      );
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
+    const base64Image = buffer.toString('base64');
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType: file.type || 'image/jpeg',
+            data: base64Image,
+          },
+        },
+        {
+          text: "Extract text from this medical bill. Summarize it at a 5th-grade reading level. Extract Total Amount Due, Due Date, and an empathetic Next Step. Output strict JSON matching: { simplifiedSummary: string, amountDue: string, dueDate: string, nextSteps: string }",
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const aiText = response.text || '{}';
+    let billData;
+    try {
+      billData = JSON.parse(aiText);
+    } catch (e) {
+      billData = {
+        simplifiedSummary: "We couldn't fully parse the bill details, but your health comes first. Please contact your billing department.",
+        amountDue: "Check bill",
+        dueDate: "Check bill",
+        nextSteps: "Call your provider's billing office directly."
+      };
     }
 
-    const imageUrl = await uploadBillImage(image);
-    const analysis = await analyzeMedicalBillFromImageUrl(imageUrl);
-    const audioUrl = await textToSpeechAndUpload(buildSpeechScript(analysis));
+    let audioUrl = null;
+    try {
+      const ttsResponse = await axios.post(
+        `https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`,
+        {
+          text: billData.simplifiedSummary,
+          model_id: 'eleven_monolingual_v1',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+        },
+        {
+          headers: {
+            'xi-api-key': process.env.ELEVENLABS_API_KEY || '',
+            'Content-Type': 'application/json',
+            'Accept': 'audio/mpeg'
+          },
+          responseType: 'arraybuffer'
+        }
+      );
 
-    return NextResponse.json({ analysis, audioUrl });
-  } catch (error) {
-    console.error("[web-upload] Failed to process bill:", error);
-    const message =
-      error instanceof Error
-        ? error.message
-        : "We could not process your bill. Please try again.";
-    return NextResponse.json({ error: message }, { status: 500 });
+      const audioBuffer = Buffer.from(ttsResponse.data);
+      const fileName = `${Date.now()}-audio.mp3`;
+      const { error: uploadError } = await supabase.storage
+        .from('audio_files')
+        .upload(fileName, audioBuffer, { contentType: 'audio/mpeg' });
+
+      if (!uploadError) {
+        const { data: publicUrlData } = supabase.storage
+          .from('audio_files')
+          .getPublicUrl(fileName);
+        audioUrl = publicUrlData.publicUrl;
+      }
+    } catch (ttsErr) {
+      console.error('TTS generation failed:', ttsErr);
+    }
+
+    return NextResponse.json({ ...billData, audioUrl });
+
+  } catch (error: any) {
+    console.error('Error processing web upload:', error);
+    return NextResponse.json({ error: error.message || 'Failed to process bill' }, { status: 500 });
   }
 }
