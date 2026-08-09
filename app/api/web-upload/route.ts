@@ -9,10 +9,20 @@ const supabase = createClient(
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
-    const file = formData.get('file') as File;
+    // Accept 'file', 'image', or any first entry in formData to prevent "No file uploaded"
+    let file = (formData.get('file') || formData.get('image')) as File;
+    if (!file) {
+      const entries = Array.from(formData.entries());
+      for (const [key, value] of entries) {
+        if (value instanceof File) {
+          file = value;
+          break;
+        }
+      }
+    }
 
     if (!file) {
-      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
+      return NextResponse.json({ error: 'No file uploaded in form data' }, { status: 400 });
     }
 
     const bytes = await file.arrayBuffer();
