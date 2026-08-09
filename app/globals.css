@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@layer base {
+  html {
+    font-size: 112.5%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-[#fff7ed] text-[#0f172a] antialiased;
+  }
+
+  :focus-visible {
+    outline: 3px solid #0b5cab;
+    outline-offset: 3px;
+  }
+}
