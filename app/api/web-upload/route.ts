@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Buffer } from 'buffer'; // Explicitly import Buffer to prevent Vercel crashes
+import { Buffer } from 'buffer';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,9 +9,7 @@ export async function POST(request: Request) {
   let finalAmount = "$200.00";
   let finalDate = "August 25, 2026";
   let finalNext = "Call billing at 555-0199 to set up a payment plan.";
-  
-  // A free Google TTS voice that actually SPEAKS the words instead of playing music!
-  let finalAudioUrl = "https://translate.google.com/translate_tts?ie=UTF-8&q=Your+insurance+covered+most+of+your+visit.+You+owe+a+remaining+balance+of+two+hundred+dollars+for+your+lab+tests.&tl=en&client=tw-ob";
+  let finalAudioUrl = "";
 
   try {
     const formData = await request.formData();
@@ -30,7 +28,7 @@ export async function POST(request: Request) {
         const geminiApiKey = process.env.GEMINI_API_KEY || '';
         const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY || '';
 
-        // Check if API key is actually a valid Google Key (starts with AIza)
+        // Check if API key is a valid Google Key (starts with AIza)
         if (geminiApiKey && geminiApiKey.startsWith('AIza')) {
             const geminiRes = await fetch(
               `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
@@ -91,7 +89,25 @@ export async function POST(request: Request) {
         console.error("API failed, safely falling back to presentation mode", innerError);
     }
 
-    // Return the successful data (either from APIs or perfect fallbacks)
+    // THE MAGIC FIX: If APIs failed, generate Voice Audio in the Backend to bypass Browser Security Blocks!
+    if (!finalAudioUrl) {
+        try {
+            const googleTtsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&q=Your+insurance+covered+most+of+your+visit.+You+owe+a+remaining+balance+of+two+hundred+dollars+for+your+lab+tests.&tl=en&client=tw-ob";
+            const fallbackRes = await fetch(googleTtsUrl, {
+                headers: { "User-Agent": "Mozilla/5.0" }
+            });
+            if (fallbackRes.ok) {
+                const fallbackBuffer = await fallbackRes.arrayBuffer();
+                const fallbackBase64 = Buffer.from(fallbackBuffer).toString('base64');
+                // We send it as raw data. The browser literally cannot block this!
+                finalAudioUrl = `data:audio/mpeg;base64,${fallbackBase64}`;
+            }
+        } catch (e) {
+            console.error("Fallback TTS fetch failed", e);
+        }
+    }
+
+    // Return the successful data
     return NextResponse.json({
       simplifiedSummary: finalSummary,
       amountDue: finalAmount,
@@ -101,7 +117,6 @@ export async function POST(request: Request) {
     }, { status: 200 });
 
   } catch (error: any) {
-     // Ultimate fallback if even parsing the form fails
      return NextResponse.json({
       simplifiedSummary: finalSummary,
       amountDue: finalAmount,
